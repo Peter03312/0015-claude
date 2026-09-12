@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { analyze, evaluate, parseSequence, rotate, type Hole } from './holes';
+import {
+  analyze,
+  evaluate,
+  filterCandidates,
+  pairsForPhase,
+  parseSequence,
+  recordObservation,
+  rotate,
+  type Hole,
+  type Observation,
+} from './holes';
 
 const seq = (s: string): Hole[] => s.split(' ') as Hole[];
 
@@ -165,5 +175,152 @@ describe('evaluate 录入汇总', () => {
   it('箭头索引越界时防御性收敛，不崩溃', () => {
     const r = evaluate({ refRaw: 'A B C D', candRaw: 'A B C D', refArrow: 99, candArrow: -3 });
     expect(r.status).toBe('ok');
+  });
+});
+
+describe('pairsForPhase 孔对映射', () => {
+  it('与 analyze 唯一相位的孔对一致', () => {
+    const ref = rotate(seq('A B C D'), 0);
+    const cand = rotate(seq('B C D A'), 0);
+    expect(pairsForPhase(ref, cand, 1)).toEqual([
+      { refIndex: 0, ref: 'A', candIndex: 3, cand: 'A' },
+      { refIndex: 1, ref: 'B', candIndex: 0, cand: 'B' },
+      { refIndex: 2, ref: 'C', candIndex: 1, cand: 'C' },
+      { refIndex: 3, ref: 'D', candIndex: 2, cand: 'D' },
+    ]);
+  });
+});
+
+describe('recordObservation 观察记录', () => {
+  it('同一索引再次提交替换旧值', () => {
+    const first = recordObservation([], 4, 1, true);
+    expect(first).toEqual({ ok: true, observations: [{ refIndex: 1, seen: true }] });
+    if (!first.ok) return;
+    const second = recordObservation(first.observations, 4, 1, false);
+    expect(second).toEqual({ ok: true, observations: [{ refIndex: 1, seen: false }] });
+  });
+
+  it('不同索引按参考索引升序保存', () => {
+    const a = recordObservation([], 6, 4, true);
+    if (!a.ok) return;
+    const b = recordObservation(a.observations, 6, 1, false);
+    expect(b).toEqual({
+      ok: true,
+      observations: [
+        { refIndex: 1, seen: false },
+        { refIndex: 4, seen: true },
+      ],
+    });
+  });
+
+  it('索引越界（含非整数）报错且不产生新观察', () => {
+    const base: Observation[] = [{ refIndex: 0, seen: true }];
+    for (const bad of [-1, 4, 1.5, NaN]) {
+      const r = recordObservation(base, 4, bad, false);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.message).toMatch(/0–3/);
+    }
+  });
+});
+
+describe('filterCandidates 观察筛选', () => {
+  it('肯定观察仅保留箭头落在该参考索引的候选', () => {
+    expect(filterCandidates([0, 2], [{ refIndex: 2, seen: true }])).toEqual([2]);
+    expect(filterCandidates([0, 1, 2, 3], [{ refIndex: 1, seen: true }])).toEqual([1]);
+  });
+
+  it('否定观察排除箭头落在该参考索引的候选', () => {
+    expect(filterCandidates([0, 2], [{ refIndex: 0, seen: false }])).toEqual([2]);
+    expect(
+      filterCandidates(
+        [0, 1, 2, 3],
+        [
+          { refIndex: 0, seen: false },
+          { refIndex: 1, seen: false },
+        ],
+      ),
+    ).toEqual([2, 3]);
+  });
+
+  it('肯定与否定组合可收敛唯一，也可能全部排除', () => {
+    expect(
+      filterCandidates(
+        [0, 1, 2, 3],
+        [
+          { refIndex: 0, seen: false },
+          { refIndex: 3, seen: true },
+        ],
+      ),
+    ).toEqual([3]);
+    // 两个位置都看见箭头：没有任何 k 能同时成立
+    expect(
+      filterCandidates(
+        [0, 2],
+        [
+          { refIndex: 0, seen: true },
+          { refIndex: 2, seen: true },
+        ],
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe('evaluate 观察筛选结论', () => {
+  // ABAB 周期序列：基础候选 k = 0、2
+  const ambiguous = { refRaw: 'A B A B', candRaw: 'A B A B', refArrow: 0, candArrow: 0 };
+
+  it('无观察时剩余全部候选，提示继续观察', () => {
+    const r = evaluate(ambiguous);
+    expect(r.status).toBe('ok');
+    if (r.status !== 'ok') return;
+    expect(r.analysis).toEqual({ kind: 'multiple', ks: [0, 2] });
+    expect(r.resolution).toEqual({ kind: 'pending', remaining: [0, 2] });
+  });
+
+  it('逐步排除后收敛为唯一相位，给出移动孔数与原有孔对', () => {
+    const r = evaluate({ ...ambiguous, observations: [{ refIndex: 0, seen: false }] });
+    expect(r.status).toBe('ok');
+    if (r.status !== 'ok') return;
+    expect(r.resolution).toMatchObject({ kind: 'resolved', k: 2 });
+    if (r.resolution?.kind !== 'resolved') return;
+    // 与 analyze 唯一相位同一映射：参考孔 i 对应待装孔 (i - 2 + 4) mod 4
+    expect(r.resolution.pairs.map(p => p.candIndex)).toEqual([2, 3, 0, 1]);
+    expect(r.resolution.pairs.every(p => p.ref === p.cand)).toBe(true);
+  });
+
+  it('观察与孔序不一致时全部排除，基础候选保留', () => {
+    // 候选只有 k = 0、2，却在参考索引 1 看见箭头
+    const r = evaluate({ ...ambiguous, observations: [{ refIndex: 1, seen: true }] });
+    expect(r.status).toBe('ok');
+    if (r.status !== 'ok') return;
+    expect(r.analysis).toEqual({ kind: 'multiple', ks: [0, 2] });
+    expect(r.resolution).toEqual({ kind: 'contradiction' });
+  });
+
+  it('唯一可装与无匹配结论不受观察影响', () => {
+    const observations: Observation[] = [{ refIndex: 0, seen: false }];
+    const u = evaluate({
+      refRaw: 'A B C D',
+      candRaw: 'B C D A',
+      refArrow: 0,
+      candArrow: 0,
+      observations,
+    });
+    expect(u.status).toBe('ok');
+    if (u.status !== 'ok') return;
+    expect(u.analysis).toMatchObject({ kind: 'unique', k: 1 });
+    expect(u.resolution).toBeNull();
+
+    const none = evaluate({
+      refRaw: 'A A A B',
+      candRaw: 'A A C D',
+      refArrow: 0,
+      candArrow: 0,
+      observations,
+    });
+    expect(none.status).toBe('ok');
+    if (none.status !== 'ok') return;
+    expect(none.analysis.kind).toBe('none');
+    expect(none.resolution).toBeNull();
   });
 });

@@ -50,6 +50,21 @@ export interface HolePair {
   cand: Hole;
 }
 
+/** 按相位 k 生成全部孔对：参考孔 i 对应待装孔 (i - k + n) mod n（与 analyze 同一映射）。 */
+export function pairsForPhase(
+  ref: readonly Hole[],
+  cand: readonly Hole[],
+  k: number,
+): HolePair[] {
+  const n = ref.length;
+  const pairs: HolePair[] = [];
+  for (let i = 0; i < n; i++) {
+    const j = (i - k + n) % n;
+    pairs.push({ refIndex: i, ref: ref[i], candIndex: j, cand: cand[j] });
+  }
+  return pairs;
+}
+
 export type Analysis =
   | { kind: 'unique'; k: number; pairs: HolePair[] }
   | { kind: 'none'; k: number; mismatchCount: number; firstMismatch: HolePair }
@@ -84,12 +99,7 @@ export function analyze(
 
   if (fullMatches.length === 1) {
     const k = fullMatches[0];
-    const pairs: HolePair[] = [];
-    for (let i = 0; i < n; i++) {
-      const j = (i - k + n) % n;
-      pairs.push({ refIndex: i, ref: ref[i], candIndex: j, cand: cand[j] });
-    }
-    return { kind: 'unique', k, pairs };
+    return { kind: 'unique', k, pairs: pairsForPhase(ref, cand, k) };
   }
 
   if (fullMatches.length > 1) {
@@ -111,17 +121,70 @@ export function analyze(
   };
 }
 
+/** 一条实物观察：在参考环某索引位置是否看见待装版箭头。 */
+export interface Observation {
+  /** 参考环索引（箭头孔为 0，顺时针编号） */
+  refIndex: number;
+  /** true = 看见待装版箭头；false = 未见 */
+  seen: boolean;
+}
+
+export type RecordObservationResult =
+  | { ok: true; observations: Observation[] }
+  | { ok: false; message: string };
+
+/**
+ * 记录一条观察：同一参考索引再次提交替换旧值，结果按索引升序保存。
+ * 索引越界（非整数或超出 0..n-1）时报错，不返回新观察，调用方保留旧值。
+ */
+export function recordObservation(
+  observations: readonly Observation[],
+  n: number,
+  refIndex: number,
+  seen: boolean,
+): RecordObservationResult {
+  if (!Number.isInteger(refIndex) || refIndex < 0 || refIndex >= n) {
+    return { ok: false, message: `参考索引须为 0–${n - 1} 的整数` };
+  }
+  const next = observations.filter(o => o.refIndex !== refIndex);
+  next.push({ refIndex, seen });
+  next.sort((a, b) => a.refIndex - b.refIndex);
+  return { ok: true, observations: next };
+}
+
+/**
+ * 依据观察筛选既有候选相位：候选 k 即箭头在参考环上的新位置。
+ * 看见箭头（i, seen）→ 仅保留 k === i；未见 → 排除 k === i。
+ * 仅复用既有候选与映射，不重新定义顺时针方向。
+ */
+export function filterCandidates(
+  ks: readonly number[],
+  observations: readonly Observation[],
+): number[] {
+  return ks.filter(k =>
+    observations.every(o => (o.seen ? o.refIndex === k : o.refIndex !== k)),
+  );
+}
+
+/** 观察筛选结论：在「相位不唯一」基础上按观察逐步排除。 */
+export type Resolution =
+  | { kind: 'pending'; remaining: number[] } // 仍有多个候选，继续观察
+  | { kind: 'resolved'; k: number; pairs: HolePair[] } // 收敛为唯一相位
+  | { kind: 'contradiction' }; // 全部排除：观察与孔序不一致
+
 export interface EvaluateInput {
   refRaw: string;
   candRaw: string;
   refArrow: number;
   candArrow: number;
+  /** 实物观察记录（可选）；仅在多个完整匹配相位时参与筛选 */
+  observations?: readonly Observation[];
 }
 
 export type Verdict =
   | { status: 'idle' }
   | { status: 'error'; message: string }
-  | { status: 'ok'; n: number; analysis: Analysis };
+  | { status: 'ok'; n: number; analysis: Analysis; resolution: Resolution | null };
 
 function clampArrow(arrow: number, n: number): number {
   if (!Number.isFinite(arrow) || arrow < 0) return 0;
@@ -129,7 +192,13 @@ function clampArrow(arrow: number, n: number): number {
 }
 
 /** 汇总录入并给出结论；任一输入非法或尚未填完时不产生结论。 */
-export function evaluate({ refRaw, candRaw, refArrow, candArrow }: EvaluateInput): Verdict {
+export function evaluate({
+  refRaw,
+  candRaw,
+  refArrow,
+  candArrow,
+  observations,
+}: EvaluateInput): Verdict {
   if (refRaw.trim() === '' || candRaw.trim() === '') {
     return { status: 'idle' };
   }
@@ -144,11 +213,30 @@ export function evaluate({ refRaw, candRaw, refArrow, candArrow }: EvaluateInput
     };
   }
   const n = ref.holes.length;
-  const analysis = analyze(
-    ref.holes,
-    clampArrow(refArrow, n),
-    cand.holes,
-    clampArrow(candArrow, n),
-  );
-  return { status: 'ok', n, analysis };
+  const refArrowClamped = clampArrow(refArrow, n);
+  const candArrowClamped = clampArrow(candArrow, n);
+  const analysis = analyze(ref.holes, refArrowClamped, cand.holes, candArrowClamped);
+
+  // 仅「相位不唯一」时按观察筛选候选；唯一可装与无匹配结论不受影响。
+  let resolution: Resolution | null = null;
+  if (analysis.kind === 'multiple') {
+    const remaining = filterCandidates(analysis.ks, observations ?? []);
+    if (remaining.length === 1) {
+      const k = remaining[0];
+      resolution = {
+        kind: 'resolved',
+        k,
+        pairs: pairsForPhase(
+          rotate(ref.holes, refArrowClamped),
+          rotate(cand.holes, candArrowClamped),
+          k,
+        ),
+      };
+    } else if (remaining.length === 0) {
+      resolution = { kind: 'contradiction' };
+    } else {
+      resolution = { kind: 'pending', remaining };
+    }
+  }
+  return { status: 'ok', n, analysis, resolution };
 }
