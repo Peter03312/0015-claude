@@ -1,0 +1,8 @@
+# 一次性验收服务：单元测试 + 针对 web 服务的 Playwright 端到端验收
+FROM mcr.microsoft.com/playwright:v1.47.2-jammy
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+ENV PLAYWRIGHT_BASE_URL=http://web:80
+CMD ["sh", "-c", "node scripts/wait-for-web.mjs && npm run test:unit && npx playwright test"]
