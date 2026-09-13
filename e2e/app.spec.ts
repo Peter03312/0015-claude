@@ -224,6 +224,65 @@ test('观察录入：索引越界在录入处反馈且不改变当前筛选结�
   await expect(page.getByTestId('obs-resolved')).toContainText('移动孔数：顺时针 0 孔');
 });
 
+test('录入校验：制表符、不换行空格、全角空格不作为孔序分隔符', async ({ page }) => {
+  const error = page.getByTestId('error');
+
+  // 制表符分隔的四孔不被识别为合法序列
+  await page.getByTestId('ref-seq').fill('A\tB\tC\tD');
+  await page.getByTestId('cand-seq').fill('A B C D');
+  await expect(error).toBeVisible();
+  await expect(error).toContainText('非法');
+  await expect(page.getByTestId('result-unique')).toHaveCount(0);
+  await expect(page.getByTestId('ref-count')).toHaveText('等待有效孔序');
+
+  // 不换行空格（U+00A0）
+  await page.getByTestId('ref-seq').fill('A B C D');
+  await page.getByTestId('cand-seq').fill('A B C D');
+  await expect(error).toBeVisible();
+  await expect(error).toContainText('待装版');
+
+  // 全角空格（U+3000）
+  await page.getByTestId('cand-seq').fill('A　B　C　D');
+  await expect(error).toBeVisible();
+  await expect(page.getByTestId('result-unique')).toHaveCount(0);
+
+  // 改为普通空格分隔后恢复结论
+  await page.getByTestId('cand-seq').fill('B C D A');
+  await expect(page.getByTestId('error')).toHaveCount(0);
+  await expect(page.getByTestId('result-unique')).toBeVisible();
+});
+
+test('观察录入：十六进制与指数格式索引被拒绝，不生成观察记录', async ({ page }) => {
+  await page.getByTestId('ref-seq').fill('A B A B');
+  await page.getByTestId('cand-seq').fill('A B A B');
+  await expect(page.getByTestId('remaining-phases')).toContainText('k = 0、2');
+
+  const obsError = page.getByTestId('obs-error');
+  const obsList = page.getByTestId('obs-list').locator('li');
+
+  // 十六进制文本（Number('0x0') === 0）应被拒绝
+  await page.getByTestId('obs-index').fill('0x0');
+  await page.getByTestId('obs-add').click();
+  await expect(obsError).toBeVisible();
+  await expect(obsError).toContainText('十进制整数');
+  await expect(obsList).toHaveCount(0);
+  await expect(page.getByTestId('remaining-phases')).toContainText('k = 0、2');
+
+  // 指数格式文本（Number('2e0') === 2）同样拒绝
+  await page.getByTestId('obs-index').fill('2e0');
+  await page.getByTestId('obs-add').click();
+  await expect(obsError).toBeVisible();
+  await expect(obsList).toHaveCount(0);
+
+  // 普通十进制整数仍被接受，错误消失，正常收敛
+  await page.getByTestId('obs-index').fill('0');
+  await page.getByTestId('obs-seen').selectOption('unseen');
+  await page.getByTestId('obs-add').click();
+  await expect(page.getByTestId('obs-error')).toHaveCount(0);
+  await expect(obsList).toHaveCount(1);
+  await expect(page.getByTestId('obs-resolved')).toContainText('移动孔数：顺时针 2 孔');
+});
+
 test('观察失效：修改任一孔序或箭头起点都会清除观察记录', async ({ page }) => {
   await page.getByTestId('ref-seq').fill('A B A B');
   await page.getByTestId('cand-seq').fill('A B A B');

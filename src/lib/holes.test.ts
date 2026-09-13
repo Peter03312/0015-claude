@@ -4,6 +4,7 @@ import {
   evaluate,
   filterCandidates,
   pairsForPhase,
+  parseObservationIndex,
   parseSequence,
   recordObservation,
   rotate,
@@ -38,6 +39,30 @@ describe('parseSequence 录入解析', () => {
 
   it('空文本', () => {
     expect(parseSequence('   ').ok).toBe(false);
+  });
+
+  it('制表符不是分隔符：制表分隔的四孔不被当作合法序列', () => {
+    for (const raw of ['A\tB\tC\tD', 'A\tB C D', 'A B C\tD']) {
+      const r = parseSequence(raw);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.message).toMatch(/非法/);
+    }
+    // 只含制表符等非空格白：不是空序列而是含非法片段
+    expect(parseSequence('\t\t').ok).toBe(false);
+  });
+
+  it('不换行空格与全角空格不是分隔符', () => {
+    // U+00A0 NO-BREAK SPACE、U+3000 IDEOGRAPHIC SPACE 均不划分孔位
+    for (const raw of [
+      'A B C D',
+      'A　B　C　D',
+      'A B C D',
+      'A B C　D',
+    ]) {
+      const r = parseSequence(raw);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.message).toMatch(/非法/);
+    }
   });
 });
 
@@ -146,6 +171,14 @@ describe('evaluate 录入汇总', () => {
     expect(evaluate({ refRaw: 'A B C D', candRaw: '  ', refArrow: 0, candArrow: 0 }).status).toBe('idle');
   });
 
+  it('制表符/全角空白不算“未填”，按非法片段报错而非静默', () => {
+    const tab = evaluate({ refRaw: '\t\t', candRaw: 'A B C D', refArrow: 0, candArrow: 0 });
+    expect(tab.status).toBe('error');
+    if (tab.status === 'error') expect(tab.message).toMatch(/参考版孔序/);
+    const ideo = evaluate({ refRaw: 'A B C D', candRaw: 'A　B　C　D', refArrow: 0, candArrow: 0 });
+    expect(ideo.status).toBe('error');
+  });
+
   it('非法字符立即报错并指明哪一环', () => {
     const r = evaluate({ refRaw: 'A B X D', candRaw: 'A B C D', refArrow: 0, candArrow: 0 });
     expect(r).toMatchObject({ status: 'error' });
@@ -188,6 +221,48 @@ describe('pairsForPhase 孔对映射', () => {
       { refIndex: 2, ref: 'C', candIndex: 1, cand: 'C' },
       { refIndex: 3, ref: 'D', candIndex: 2, cand: 'D' },
     ]);
+  });
+});
+
+describe('parseObservationIndex 观察索引十进制校验', () => {
+  it('仅接受普通十进制整数', () => {
+    expect(parseObservationIndex('0')).toBe(0);
+    expect(parseObservationIndex('2')).toBe(2);
+    expect(parseObservationIndex(' 3 ')).toBe(3); // 首尾普通空格允许
+    expect(parseObservationIndex('47')).toBe(47);
+  });
+
+  it('拒绝十六进制文本（即使 Number 能解释为整数）', () => {
+    for (const raw of ['0x0', '0X2', '0x10', '0xff']) {
+      expect(parseObservationIndex(raw)).toBeNull();
+    }
+  });
+
+  it('拒绝指数格式文本', () => {
+    for (const raw of ['2e0', '1e1', '2E0', '0e0']) {
+      expect(parseObservationIndex(raw)).toBeNull();
+    }
+  });
+
+  it('拒绝其它非十进制整数写法', () => {
+    for (const raw of [
+      '',
+      '   ',
+      'x',
+      '1.5',
+      '2.0',
+      '+1',
+      '-1',
+      '1 2',
+      '1\n2',
+      ' 1\t',
+      ' 1 ', // 不换行空格
+      '１', // 全角数字
+      'Infinity',
+      'NaN',
+    ]) {
+      expect(parseObservationIndex(raw)).toBeNull();
+    }
   });
 });
 

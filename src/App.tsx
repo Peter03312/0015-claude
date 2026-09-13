@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   evaluate,
+  parseObservationIndex,
   parseSequence,
   recordObservation,
   type Analysis,
@@ -145,8 +146,8 @@ function ObservationPanel({
   n: number;
   observations: Observation[];
   obsError: string | null;
-  /** 返回是否记录成功；失败（索引越界）时保留当前筛选结果 */
-  onRecord: (refIndex: number, seen: boolean) => boolean;
+  /** 返回是否记录成功；失败（格式非法或索引越界）时保留当前筛选结果 */
+  onRecord: (rawIndex: string, seen: boolean) => boolean;
   onClear: () => void;
 }) {
   const [indexRaw, setIndexRaw] = useState('');
@@ -183,8 +184,8 @@ function ObservationPanel({
           type="button"
           data-testid="obs-add"
           onClick={() => {
-            const idx = indexRaw.trim() === '' ? NaN : Number(indexRaw);
-            if (onRecord(idx, seen === 'seen')) setIndexRaw('');
+            // 严格十进制整数解析：十六进制（0x0）、指数（2e0）等文本不生成观察。
+            if (onRecord(indexRaw, seen === 'seen')) setIndexRaw('');
           }}
         >
           记录观察
@@ -242,8 +243,14 @@ export default function App() {
     [refRaw, candRaw, refArrow, candArrow, observations],
   );
 
-  const handleRecord = (refIndex: number, seen: boolean): boolean => {
+  const handleRecord = (rawIndex: string, seen: boolean): boolean => {
     if (verdict.status !== 'ok') return false;
+    const refIndex = parseObservationIndex(rawIndex);
+    if (refIndex === null) {
+      // 非十进制整数文本：仅在录入处反馈，不生成观察、不改变当前筛选结果。
+      setObsError(`参考索引须为 0–${verdict.n - 1} 的普通十进制整数`);
+      return false;
+    }
     const r = recordObservation(observations, verdict.n, refIndex, seen);
     if (!r.ok) {
       // 索引越界：仅在录入处反馈，不改变当前筛选结果。

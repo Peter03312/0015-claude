@@ -2,7 +2,8 @@
  * 换网版定位孔相位校验核心逻辑（纯函数，不调用任何在线服务）。
  *
  * 约定：
- * - 每环孔以 A/B/C/D 标记，输入为顺时针孔序，空格分隔。
+ * - 每环孔以 A/B/C/D 标记，输入为顺时针孔序，仅由普通空格（U+0020）分隔；
+ *   制表符、不换行空格、全角空格等均非分隔符。
  * - 用户为每环选定一枚带向外箭头的起始孔；以该孔为索引 0，沿顺时针编号。
  * - 零相位：两枚箭头重合。待装版顺时针移动 k 孔后，其箭头落在参考环索引 k，
  *   参考孔 i 对应待装孔 (i - k + n) mod n。仅枚举顺时针相位，禁止反转匹配。
@@ -17,9 +18,18 @@ const HOLE_PATTERN = /^[ABCD]$/;
 
 export type ParseResult = { ok: true; holes: Hole[] } | { ok: false; message: string };
 
-/** 解析孔序文本：忽略首尾及连续空格，仅允许 A/B/C/D 单字母，孔数 4–48。 */
+/**
+ * 分隔符仅允许普通空格（U+0020）：制表符、不换行空格（U+00A0）、
+ * 全角空格（U+3000）等任何其它空白均不是分隔符，会随相邻片段构成非法片段。
+ * 忽略首尾及连续普通空格（split 后过滤空串）。
+ */
+export function tokenizeSequence(raw: string): string[] {
+  return raw.split(' ').filter(Boolean);
+}
+
+/** 解析孔序文本：仅以普通空格分隔，仅允许 A/B/C/D 单字母，孔数 4–48。 */
 export function parseSequence(raw: string): ParseResult {
-  const tokens = raw.trim().split(/\s+/).filter(Boolean);
+  const tokens = tokenizeSequence(raw);
   if (tokens.length === 0) {
     return { ok: false, message: '孔序为空' };
   }
@@ -134,6 +144,19 @@ export type RecordObservationResult =
   | { ok: false; message: string };
 
 /**
+ * 解析观察索引文本：仅接受普通十进制整数（一个或多个数字 0–9）。
+ * 允许首尾普通空格（录入处惯例）；十六进制（0x0）、指数（2e0）、正负号、
+ * 小数、全角数字等一律拒绝。Number 会把 0x0/2e0 解释成数字，故不能直接 Number 后判整数。
+ */
+export function parseObservationIndex(raw: string): number | null {
+  // 仅允许首尾普通空格（U+0020）作录入留白；制表符、全角空白等不被吞掉。
+  const m = /^ *([0-9]+) *$/.exec(raw);
+  if (!m) return null;
+  const value = Number(m[1]);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+/**
  * 记录一条观察：同一参考索引再次提交替换旧值，结果按索引升序保存。
  * 索引越界（非整数或超出 0..n-1）时报错，不返回新观察，调用方保留旧值。
  */
@@ -199,7 +222,9 @@ export function evaluate({
   candArrow,
   observations,
 }: EvaluateInput): Verdict {
-  if (refRaw.trim() === '' || candRaw.trim() === '') {
+  // “未填”仅指空串或只含普通空格；制表符、全角空白等交由 parseSequence 判非法。
+  const isBlank = (raw: string) => tokenizeSequence(raw).length === 0;
+  if (isBlank(refRaw) || isBlank(candRaw)) {
     return { status: 'idle' };
   }
   const ref = parseSequence(refRaw);
